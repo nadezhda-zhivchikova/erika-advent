@@ -493,6 +493,7 @@ def main() -> None:
     )
     application.add_handler(conv)
 
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("gift", gift))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("time", time_command))
