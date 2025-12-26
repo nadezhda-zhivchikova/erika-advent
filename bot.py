@@ -2,7 +2,6 @@
 """Telegram бот для адвент-календаря (Railway + Postgres)."""
 
 import os
-import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -40,6 +39,18 @@ DB_URL = os.environ.get("DATABASE_URL")
 
 
 # =========================
+# Минимальная отладочная печать
+# =========================
+def log_command(update: Update, command: str) -> None:
+    user = update.effective_user
+    if not user:
+        logger.info("COMMAND %s | user=UNKNOWN", command)
+        return
+    username = f"@{user.username}" if user.username else "no_username"
+    logger.info("COMMAND %s | user=%s (%s)", command, user.id, username)
+
+
+# =========================
 # Модель данных
 # =========================
 @dataclass
@@ -60,7 +71,6 @@ def db_conn():
 
 
 def db_init() -> None:
-    """Создаем таблицу, если ее нет."""
     with db_conn() as conn:
         conn.execute(
             """
@@ -77,7 +87,6 @@ def db_init() -> None:
 
 
 def db_upsert_plan(user_id: int, plan: UserPlan) -> None:
-    """Сохраняем/обновляем план пользователя."""
     with db_conn() as conn:
         conn.execute(
             """
@@ -95,7 +104,6 @@ def db_upsert_plan(user_id: int, plan: UserPlan) -> None:
 
 
 def db_load_all() -> Dict[int, UserPlan]:
-    """Загружаем всех подписчиков в память."""
     users: Dict[int, UserPlan] = {}
     with db_conn() as conn:
         rows = conn.execute("SELECT * FROM subscribers").fetchall()
@@ -262,6 +270,7 @@ def make_keyboard(prefix: str, days: range) -> InlineKeyboardMarkup:
 # Команды и хендлеры
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    log_command(update, "/start")
     keyboard = make_keyboard("start", range(1, 32))
     await update.message.reply_text(
         "Приветик!! С наступающим :3 Выбери дату, с которой начнется твой адвент-календарь!",
@@ -273,6 +282,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def pick_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    log_command(update, f"callback:{query.data}")
 
     _, day_str = query.data.split("_")
     day = int(day_str)
@@ -296,7 +306,6 @@ def schedule_next_gift(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: U
     if context.job_queue is None:
         return
 
-    # удаляем прошлую задачу
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
@@ -338,15 +347,14 @@ async def send_scheduled_gift(context: ContextTypes.DEFAULT_TYPE) -> None:
     plan.next_date = plan.next_date + timedelta(days=1)
     users[user_id] = plan
 
-    # persist
     db_upsert_plan(user_id, plan)
-
     schedule_next_gift(context, user_id, plan)
 
 
 async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    log_command(update, f"callback:{query.data}")
 
     _, day_str = query.data.split("_")
     end_day = int(day_str)
@@ -368,7 +376,6 @@ async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     next_date = max(start_dt, today)
     plan = UserPlan(start_date=start_dt, end_date=end_dt, next_date=next_date)
 
-    # Если сегодня попадает в период — сразу выдаем подарок и сдвигаем next_date
     await query.edit_message_text("Ураа! Твой адвент-календарь готов!")
 
     if start_dt <= today <= end_dt:
@@ -377,8 +384,6 @@ async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         plan.next_date = today + timedelta(days=1)
 
     users[query.from_user.id] = plan
-
-    # persist
     db_upsert_plan(query.from_user.id, plan)
 
     schedule_next_gift(context, query.from_user.id, plan)
@@ -386,11 +391,13 @@ async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    log_command(update, "/cancel")
     await update.message.reply_text("Диалог завершен. Напиши /start, чтобы начать заново.")
     return ConversationHandler.END
 
 
 async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_command(update, "/gift")
     users = get_user_store(context)
     user_id = update.effective_user.id if update.effective_user else None
     if user_id is None:
@@ -427,6 +434,7 @@ async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_command(update, "/help")
     await update.message.reply_text(
         "Похоже, тебе нужна помощь! Держи список всех команд и что они делают =)\n\n"
         "/start: запуск бота: выбрать даты адвента;\n"
@@ -438,11 +446,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_command(update, "/time")
     now_moscow = datetime.now(MOSCOW_TZ).strftime("%H:%M")
     await update.message.reply_text(f"Сейчас в Москве {now_moscow}")
 
 
 async def subscribers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log_command(update, "/subscribers")
     await update.message.reply_text(f"Сейчас подписчиков: {db_count_subscribers()}")
 
 
@@ -458,7 +468,7 @@ def main() -> None:
 
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables.")
+        raise RuntimeError("TELEGRAM_TOKEN is not set in Railway Variables.")
 
     # Python 3.14+: создаем loop вручную
     loop = asyncio.new_event_loop()
@@ -469,4 +479,31 @@ def main() -> None:
 
     application = Application.builder().token(token).build()
 
-    # поднимем users в память (не обязательно, но уд
+    # Поднимаем users в память (нужно для логики планировщика)
+    application.bot_data["users"] = db_load_all()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            STATE_START: [CallbackQueryHandler(pick_start_date, pattern=r"^start_\d+$")],
+            STATE_END: [CallbackQueryHandler(pick_end_date, pattern=r"^end_\d+$")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        per_message=True,  # важно для inline-кнопок
+    )
+    application.add_handler(conv)
+
+    application.add_handler(CommandHandler("gift", gift))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("time", time_command))
+    application.add_handler(CommandHandler("subscribers", subscribers_command))
+    application.add_handler(CommandHandler("suscribers", subscribers_command))  # алиас, если нужно
+
+    application.add_error_handler(error_handler)
+
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
