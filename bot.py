@@ -474,6 +474,11 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    from urllib.parse import urlparse
+
+    parsed = urlparse(os.environ.get("DATABASE_URL", ""))
+    logger.info("DB host=%s port=%s db=%s", parsed.hostname, parsed.port, parsed.path)
+
     # Инициализация БД и загрузка подписчиков
     db_init()
 
