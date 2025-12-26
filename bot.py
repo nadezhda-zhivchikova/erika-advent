@@ -219,8 +219,9 @@ def schedule_next_gift(
         return
 
     # Планируем на 12:00 по московскому времени
-    run_at = datetime.combine(plan.next_date, time(12, 0), tzinfo=MOSCOW_TZ)
-    
+    # run_at = datetime.combine(plan.next_date, time(12, 0), tzinfo=MOSCOW_TZ)
+    run_at = datetime.combine(plan.next_date, time(19, 20), tzinfo=MOSCOW_TZ)
+
     # Если время уже прошло сегодня, планируем на завтра в 12:00
     now = datetime.now(MOSCOW_TZ)
     if run_at <= now:
