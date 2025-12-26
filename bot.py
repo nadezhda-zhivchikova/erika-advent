@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Telegram бот для адвент-календаря."""
+"""Telegram бот для адвент-календаря (Railway + Postgres)."""
 
 import os
+import json
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
+
+import psycopg
+from psycopg.rows import dict_row
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -16,25 +21,107 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-# Константы состояний
+# =========================
+# Настройки
+# =========================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
 STATE_START = 1
 STATE_END = 2
 
-# Московское время
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
+# Время ежедневной рассылки (по Москве)
+SEND_TIME = time(12, 0)
+
+# Postgres (Railway обычно дает DATABASE_URL)
+DB_URL = os.environ.get("DATABASE_URL")
+
+
+# =========================
+# Модель данных
+# =========================
 @dataclass
 class UserPlan:
     start_date: date
     end_date: date
     next_date: date
-    # Дата, за которую последний раз реально был выдан подарок (по расписанию или вручную)
     last_gift_date: Optional[date] = None
 
 
+# =========================
+# Работа с БД
+# =========================
+def db_conn():
+    if not DB_URL:
+        raise RuntimeError("DATABASE_URL is not set (Railway Postgres).")
+    return psycopg.connect(DB_URL, row_factory=dict_row)
+
+
+def db_init() -> None:
+    """Создаем таблицу, если ее нет."""
+    with db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscribers (
+              user_id BIGINT PRIMARY KEY,
+              start_date DATE NOT NULL,
+              end_date DATE NOT NULL,
+              next_date DATE NOT NULL,
+              last_gift_date DATE
+            );
+            """
+        )
+        conn.commit()
+
+
+def db_upsert_plan(user_id: int, plan: UserPlan) -> None:
+    """Сохраняем/обновляем план пользователя."""
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO subscribers (user_id, start_date, end_date, next_date, last_gift_date)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET
+              start_date = EXCLUDED.start_date,
+              end_date = EXCLUDED.end_date,
+              next_date = EXCLUDED.next_date,
+              last_gift_date = EXCLUDED.last_gift_date;
+            """,
+            (user_id, plan.start_date, plan.end_date, plan.next_date, plan.last_gift_date),
+        )
+        conn.commit()
+
+
+def db_load_all() -> Dict[int, UserPlan]:
+    """Загружаем всех подписчиков в память."""
+    users: Dict[int, UserPlan] = {}
+    with db_conn() as conn:
+        rows = conn.execute("SELECT * FROM subscribers").fetchall()
+
+    for r in rows:
+        uid = int(r["user_id"])
+        users[uid] = UserPlan(
+            start_date=r["start_date"],
+            end_date=r["end_date"],
+            next_date=r["next_date"],
+            last_gift_date=r["last_gift_date"],
+        )
+    return users
+
+
+def db_count_subscribers() -> int:
+    with db_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM subscribers").fetchone()
+    return int(row["c"])
+
+
+# =========================
+# Адвенты
+# =========================
 def get_gift_text(gift_date: date) -> str:
     """Возвращает текст подарка для конкретной даты."""
-    # 1 декабря
     if gift_date.month == 12 and gift_date.day == 1:
         return (
             "❝ Нет ничего лучше историй, рассказанных ветреной ночью, когда люди находят тёплое укрытие "
@@ -48,7 +135,6 @@ def get_gift_text(gift_date: date) -> str:
             "3. 🐝Yandex Market -- https://market.yandex.ru/cc/8CfCY2"
         )
 
-    # 2 декабря
     if gift_date.month == 12 and gift_date.day == 2:
         return (
             "❝Мысли похожи на вязание. Иногда они не вяжутся, а иногда пытаешься вязать свитер, "
@@ -61,7 +147,6 @@ def get_gift_text(gift_date: date) -> str:
             "3. Yandex Market -- https://market.yandex.ru/cc/8CfSXv"
         )
 
-    # 25 декабря
     if gift_date.month == 12 and gift_date.day == 25:
         return (
             "❝ Пожелание «Счастливого Нового года!» чем дальше, тем больше означает триумф надежды над опытом. ❞\n"
@@ -74,7 +159,6 @@ def get_gift_text(gift_date: date) -> str:
             "3. Yandex Market -- https://market.yandex.ru/cc/8HyWG8"
         )
 
-    # 26 декабря
     if gift_date.month == 12 and gift_date.day == 26:
         return (
             "❝ Нет лучшего утешения в старости, чем сознание того, что удалось всю силу молодости "
@@ -88,7 +172,6 @@ def get_gift_text(gift_date: date) -> str:
             "3. Yandex Market -- https://market.yandex.ru/cc/8HyW5V"
         )
 
-    # 27 декабря
     if gift_date.month == 12 and gift_date.day == 27:
         return (
             "❝ Невозможно найти счастье в себе, не попробовав его в объятиях хотя бы одного человека. ❞\n\n"
@@ -101,7 +184,6 @@ def get_gift_text(gift_date: date) -> str:
             "3. Yandex Market -- https://market.yandex.ru/cc/8HyoFt"
         )
 
-    # 28 декабря
     if gift_date.month == 12 and gift_date.day == 28:
         return (
             "❝ Запахи имеют ту особенность, что навевают воспоминания о прошлом с его звуками и ароматами, "
@@ -113,20 +195,18 @@ def get_gift_text(gift_date: date) -> str:
             "2. Ozon -- https://ozon.ru/t/fArd3RG \n"
             "3. Yandex Market -- https://market.yandex.ru/cc/8HzGTw"
         )
-    
-    # 29 декабря
+
     if gift_date.month == 12 and gift_date.day == 29:
         return (
             "❝ Я должен был пить много чая, ибо без него не мог работать. Чай высвобождает те возможности,"
             " которые дремлют в глубине моей души. ❞\n\n"
             "📚 Лев Николаевич Толстой. \n\n"
-            "ДВА ДНЯ ДО НОВОГО ГОДА!! Ура и чтобы отпраздновать это события, посади всех за чашечку чая :3 "
-            "ароматические свечи!\n"
+            "ДВА ДНЯ ДО НОВОГО ГОДА!! Ура и чтобы отпраздновать это события, посади всех за чашечку чая :3\n"
             "1. WB -- https://www.wildberries.ru/catalog/690979768/detail.aspx?size=943747644 \n"
             "2. OZON -- https://www.ozon.ru/product/nabor-novogodnih-kruzhek-lefard-shchelkunchik-305-ml-2-shtuki-farfor-1420785313/?at=79tn1yyGEcR92pXPuyP2g8KfPoVn7RtOzv2mGc5KpGW \n"
-            "3. Yandex Merket -- https://market.yandex.ru/cc/8Kxm54"
+            "3. Yandex Market -- https://market.yandex.ru/cc/8Kxm54"
         )
-    # 30 декабря
+
     if gift_date.month == 12 and gift_date.day == 30:
         return (
             "❝ Снег...он ухитряется залететь даже в сны...даже в лето, "
@@ -138,30 +218,34 @@ def get_gift_text(gift_date: date) -> str:
             "2. OZON -- https://ozon.ru/t/baEcZb1 \n"
             "3. Yandex Market -- https://market.yandex.ru/cc/8HzmdN"
         )
-    # 31 декабря
+
     if gift_date.month == 12 and gift_date.day == 31:
         return (
             "УРАА, ЗАВТРА НОВЫЙ ГОД!!!!! ❝ Новый год. Время обещаний и веры в то, что с утра всё начнётся заново, "
             "станет лучше и счастливее. ❞\n\n"
             "📚 Януш Леон Вишневский. \n\n"
-            "И для праздничного настроения — настоящая магия света ✨"  
-            "Пусть в этот вечер вокруг будет тепло, уют и немного новогоднего волшебства!\n"
+            "И для праздничного настроения — настоящая магия света ✨\n"
+            "Пусть в этот вечер вокруг будет тепло, уют и немного новогоднего волшебства!\n\n"
             "1. WB -- https://www.wildberries.ru/catalog/272518316/detail.aspx?size=420740421 \n"
             "2. OZON -- https://ozon.ru/t/ifPUFxK \n"
             "3. Yandex Market -- https://market.yandex.ru/cc/8KxzbG"
         )
 
-    # Текст по умолчанию для остальных дней
     return f"Вот твой подарочек на {gift_date.strftime('%d.%m')}! 🎁"
 
 
+# =========================
+# Хранилище пользователей (в памяти приложения)
+# =========================
 def get_user_store(context: ContextTypes.DEFAULT_TYPE) -> Dict[int, UserPlan]:
     store = context.bot_data.setdefault("users", {})
     return store  # type: ignore[return-value]
 
 
+# =========================
+# UI: клавиатуры
+# =========================
 def make_keyboard(prefix: str, days: range) -> InlineKeyboardMarkup:
-    """Формируем клавиатуру с днями."""
     buttons = []
     row = []
     for d in days:
@@ -174,6 +258,9 @@ def make_keyboard(prefix: str, days: range) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+# =========================
+# Команды и хендлеры
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = make_keyboard("start", range(1, 32))
     await update.message.reply_text(
@@ -197,39 +284,34 @@ async def pick_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data["start_date"] = start_dt
 
     await query.edit_message_text(
-        "Отлично! Теперь, с сегодняшнего дня, каждый день в 12:00 по московскому времени будет приходить твой подарочек!! А теперь выбери конечную дату!",
+        f"Отлично! Теперь, с сегодняшнего дня, каждый день в {SEND_TIME.strftime('%H:%M')} по московскому времени "
+        "будет приходить твой подарочек!! А теперь выбери конечную дату!",
         reply_markup=make_keyboard("end", range(24, 32)),
     )
     return STATE_END
 
 
-def schedule_next_gift(
-    context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: UserPlan
-) -> None:
-    """Планируем отправку следующего подарка, если это нужно."""
+def schedule_next_gift(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: UserPlan) -> None:
     job_name = f"gift_{user_id}"
     if context.job_queue is None:
         return
 
-    # Удаляем прошлую задачу пользователя
+    # удаляем прошлую задачу
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
 
     if plan.next_date > plan.end_date:
         return
 
-    # Планируем на 12:00 по московскому времени
-    run_at = datetime.combine(plan.next_date, time(12, 0), tzinfo=MOSCOW_TZ)
+    run_at = datetime.combine(plan.next_date, SEND_TIME, tzinfo=MOSCOW_TZ)
 
-    # Если время уже прошло сегодня, планируем на завтра в 12:00
     now = datetime.now(MOSCOW_TZ)
     if run_at <= now:
-        # Если сегодняшнее время уже прошло, планируем на завтра
         tomorrow = plan.next_date + timedelta(days=1)
         if tomorrow > plan.end_date:
             return
-        run_at = datetime.combine(tomorrow, time(12, 0), tzinfo=MOSCOW_TZ)
-    
+        run_at = datetime.combine(tomorrow, SEND_TIME, tzinfo=MOSCOW_TZ)
+
     context.job_queue.run_once(
         send_scheduled_gift,
         when=run_at,
@@ -249,13 +331,16 @@ async def send_scheduled_gift(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not plan:
         return
 
-    # Отправляем подарок за текущую дату плана
     text = get_gift_text(plan.next_date)
     await context.bot.send_message(chat_id=user_id, text=text)
 
     plan.last_gift_date = plan.next_date
     plan.next_date = plan.next_date + timedelta(days=1)
     users[user_id] = plan
+
+    # persist
+    db_upsert_plan(user_id, plan)
+
     schedule_next_gift(context, user_id, plan)
 
 
@@ -282,23 +367,20 @@ async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     next_date = max(start_dt, today)
     plan = UserPlan(start_date=start_dt, end_date=end_dt, next_date=next_date)
-    users[query.from_user.id] = plan
 
-    # Ответ пользователю - упрощенный текст
+    # Если сегодня попадает в период — сразу выдаем подарок и сдвигаем next_date
     await query.edit_message_text("Ураа! Твой адвент-календарь готов!")
 
     if start_dt <= today <= end_dt:
-        # Отправляем подарок сразу и планируем следующие
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=get_gift_text(today),
-        )
+        await context.bot.send_message(chat_id=query.from_user.id, text=get_gift_text(today))
         plan.last_gift_date = today
         plan.next_date = today + timedelta(days=1)
-    else:
-        plan.next_date = next_date
 
     users[query.from_user.id] = plan
+
+    # persist
+    db_upsert_plan(query.from_user.id, plan)
+
     schedule_next_gift(context, query.from_user.id, plan)
     return ConversationHandler.END
 
@@ -309,7 +391,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /gift — выдать или повторить подарок за сегодня."""
     users = get_user_store(context)
     user_id = update.effective_user.id if update.effective_user else None
     if user_id is None:
@@ -317,93 +398,75 @@ async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan: Optional[UserPlan] = users.get(user_id)
     if not plan:
-        await update.message.reply_text(
-            "Похоже, ты ещё не настроил свой адвент-календарь. Напиши /start, чтобы выбрать даты!"
-        )
+        await update.message.reply_text("Похоже, ты ещё не настроил свой адвент-календарь. Напиши /start!")
         return
 
     today = datetime.now(MOSCOW_TZ).date()
 
-    # Уже получен подарок за сегодня
     if plan.last_gift_date == today:
         await update.message.reply_text(
-            "Сегодня ты уже получил свой подарок, вот повтор этого сообщения!\n\n"
-            + get_gift_text(today)
+            "Сегодня ты уже получил свой подарок, вот повтор этого сообщения!\n\n" + get_gift_text(today)
         )
         return
 
-    # Подарок за сегодня ещё не получен — выдаём его сейчас
     await update.message.reply_text(
-        "Приветик!! Сегодня твой подарок еще не получен (он появляется сам в 12:00 по московскому времени). "
+        f"Приветик!! Сегодня твой подарок еще не получен (он появляется сам в {SEND_TIME.strftime('%H:%M')} по московскому времени). "
         "Вот он сейчас :3!!\n\n" + get_gift_text(today)
     )
 
-    # Считаем этот подарок официальным "сегодняшним"
     plan.last_gift_date = today
 
-    # Если по плану следующий подарок должен был прийти сегодня или раньше —
-    # сдвигаем на завтра и обновляем задачу в очереди.
     if plan.next_date <= today:
         plan.next_date = today + timedelta(days=1)
         users[user_id] = plan
+        db_upsert_plan(user_id, plan)
         schedule_next_gift(context, user_id, plan)
     else:
         users[user_id] = plan
+        db_upsert_plan(user_id, plan)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /help — список команд и поддержка."""
     await update.message.reply_text(
         "Похоже, тебе нужна помощь! Держи список всех команд и что они делают =)\n\n"
-        "/start: запуск бота: ты сможешь выбрать дату, с которой начинается твой адвент-календарь "
-        "и в этот же день начать получать сообщения!;\n"
-        "/gift: бот присылает сегодняшнее сообщение либо, если ты уже получил(-а) его, предлагает подождать до завтра;\n"
-        "/help: бот присылает список команд и их функционала, а также контакты службы поддержки;\n"
-        "/time: бот предлагает установить время, по которому будет присылать сообщения.\n\n"
-        "Если тебе всё ещё что-то непонятно, обратись в нашу службу поддержки, мы с радостью поможем! @rinOkia_3"
+        "/start: запуск бота: выбрать даты адвента;\n"
+        "/gift: получить сегодняшнее сообщение (или повтор, если уже получал/получала);\n"
+        "/subscribers: показать количество подписчиков;\n"
+        "/help: список команд;\n"
+        "/time: показать текущее время в Москве.\n"
     )
 
 
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /time — показать текущее московское время."""
     now_moscow = datetime.now(MOSCOW_TZ).strftime("%H:%M")
     await update.message.reply_text(f"Сейчас в Москве {now_moscow}")
 
 
+async def subscribers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Сейчас подписчиков: {db_count_subscribers()}")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Exception while handling an update:", exc_info=context.error)
+
+
+# =========================
+# main
+# =========================
 def main() -> None:
     import asyncio
 
-    # Используйте переменную окружения TELEGRAM_TOKEN.
-    # Токен ниже оставлен для удобного локального прогона, замените его своим.
-    token = os.environ.get(
-        "TELEGRAM_TOKEN",
-        "7678922998:AAHLQETAuuMRAW_8RWtpU8qzZhOMeD2z5EM",
-    )
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables.")
 
-    # Создаём event loop вручную (для Python 3.14, где по умолчанию его нет)
+    # Python 3.14+: создаем loop вручную
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Инициализация БД и загрузка подписчиков
+    db_init()
+
     application = Application.builder().token(token).build()
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            STATE_START: [CallbackQueryHandler(pick_start_date, pattern=r"^start_\d+$")],
-            STATE_END: [CallbackQueryHandler(pick_end_date, pattern=r"^end_\d+$")],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
-    application.add_handler(conv)
-
-    # Дополнительные команды
-    application.add_handler(CommandHandler("gift", gift))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("time", time_command))
-
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+    # поднимем users в память (не обязательно, но уд
