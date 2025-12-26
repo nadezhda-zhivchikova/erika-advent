@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 import psycopg
 from psycopg.rows import dict_row
@@ -219,7 +220,7 @@ def get_gift_text(gift_date: date) -> str:
         return (
             "❝ Снег...он ухитряется залететь даже в сны...даже в лето, "
             " потому что зима мне почему-то никогда не снится. ❞\n\n"
-            "📚 Ольга Громыко. \n\n"
+            "📚 Ольга Громыко. ❞\n\n"
             "ОДИН ДЕНЬ ДО НОВОГО ГОДА!!! Надеюсь у каждого из нас есть снег сейчас,  "
             "даже если нет, в снежном шаре он будет круглый год!!\n"
             "1. WB -- https://www.wildberries.ru/catalog/187864053/detail.aspx?size=307883201 \n"
@@ -272,7 +273,7 @@ def make_keyboard(prefix: str, days: range) -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     log_command(update, "/start")
     keyboard = make_keyboard("start", range(1, 32))
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Приветик!! С наступающим :3 Выбери дату, с которой начнется твой адвент-календарь!",
         reply_markup=keyboard,
     )
@@ -392,7 +393,7 @@ async def pick_end_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     log_command(update, "/cancel")
-    await update.message.reply_text("Диалог завершен. Напиши /start, чтобы начать заново.")
+    await update.effective_message.reply_text("Диалог завершен. Напиши /start, чтобы начать заново.")
     return ConversationHandler.END
 
 
@@ -405,18 +406,18 @@ async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan: Optional[UserPlan] = users.get(user_id)
     if not plan:
-        await update.message.reply_text("Похоже, ты ещё не настроил свой адвент-календарь. Напиши /start!")
+        await update.effective_message.reply_text("Похоже, ты ещё не настроил свой адвент-календарь. Напиши /start!")
         return
 
     today = datetime.now(MOSCOW_TZ).date()
 
     if plan.last_gift_date == today:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "Сегодня ты уже получил свой подарок, вот повтор этого сообщения!\n\n" + get_gift_text(today)
         )
         return
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"Приветик!! Сегодня твой подарок еще не получен (он появляется сам в {SEND_TIME.strftime('%H:%M')} по московскому времени). "
         "Вот он сейчас :3!!\n\n" + get_gift_text(today)
     )
@@ -435,7 +436,7 @@ async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log_command(update, "/help")
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "Похоже, тебе нужна помощь! Держи список всех команд и что они делают =)\n\n"
         "/start: запуск бота: выбрать даты адвента;\n"
         "/gift: получить сегодняшнее сообщение (или повтор, если уже получал/получала);\n"
@@ -447,12 +448,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log_command(update, "/time")
     now_moscow = datetime.now(MOSCOW_TZ).strftime("%H:%M")
-    await update.message.reply_text(f"Сейчас в Москве {now_moscow}")
+    await update.effective_message.reply_text(f"Сейчас в Москве {now_moscow}")
 
 
 async def subscribers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log_command(update, "/subscribers")
-    await update.message.reply_text(f"Сейчас подписчиков: {db_count_subscribers()}")
+    await update.effective_message.reply_text(f"Сейчас подписчиков: {db_count_subscribers()}")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -469,21 +470,15 @@ def main() -> None:
     if not token:
         raise RuntimeError("TELEGRAM_TOKEN is not set in Railway Variables.")
 
-    # Python 3.14+: создаем loop вручную
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    from urllib.parse import urlparse
 
     parsed = urlparse(os.environ.get("DATABASE_URL", ""))
     logger.info("DB host=%s port=%s db=%s", parsed.hostname, parsed.port, parsed.path)
 
-    # Инициализация БД и загрузка подписчиков
     db_init()
 
     application = Application.builder().token(token).build()
-
-    # Поднимаем users в память (нужно для логики планировщика)
     application.bot_data["users"] = db_load_all()
 
     conv = ConversationHandler(
@@ -494,7 +489,7 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
-        per_message=True,  # важно для inline-кнопок
+        per_message=True,
     )
     application.add_handler(conv)
 
@@ -502,7 +497,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("time", time_command))
     application.add_handler(CommandHandler("subscribers", subscribers_command))
-    application.add_handler(CommandHandler("suscribers", subscribers_command))  # алиас, если нужно
+    application.add_handler(CommandHandler("suscribers", subscribers_command))  # алиас
 
     application.add_error_handler(error_handler)
 
